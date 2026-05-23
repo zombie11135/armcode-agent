@@ -1,0 +1,143 @@
+# skill_lib/perception/describe_scene.py
+
+from core.skill_base import BaseSkill, SkillResult
+
+
+DEFAULT_MULTI_VIEW_SCENE_PROMPT = """
+你是一个机器人视觉描述模块 VDM。现在会给你两张图像：
+
+第一张图像来自全局相机：
+- 用于观察整个桌面场景；
+- 可以判断桌面上有哪些物体、物体之间的大致位置关系、托盘或容器的位置；
+- 但是全局相机没有手眼标定，所以不能输出机械臂坐标或精确三维位置。
+
+第二张图像来自腕部相机：
+- 用于观察机械臂末端附近的局部区域；
+- 可以辅助判断夹爪附近的目标、药盒文字、局部遮挡、抓取前状态；
+- 如果腕部图像看不到完整场景，请不要过度推断。
+
+请综合两张图像，输出适合机器人 Agent 后续规划的场景描述。
+两张图可能观察的是同一场景，请不要简单相加物体数量。
+请尝试合并两个视角中可能对应同一物体的观察结果。
+请重点描述：
+1. 桌面上有哪些可操作物体，例如药盒、水果、小方块、托盘、盒子、杯子等；
+2. 哪些物体可能是抓取目标；
+3. 哪些区域或容器可能是放置目标；
+4. 全局图和腕部图分别提供了什么信息；
+5. 如果图中有药盒或文字，可以说明可能存在文字，但不要编造无法确认的具体文字；
+6. 不要输出机械臂精确坐标；
+7. 如果信息不确定，请明确说“不确定”。
+8. 聚焦于桌面，忽略背景放置的杂物，比如人等，请聚焦于桌面
+
+请用中文输出，格式如下：
+
+【全局相机观察】
+...
+
+【腕部相机观察】
+...
+
+【综合场景理解】
+...
+
+【可操作物体】
+1. ...
+2. ...
+"""
+
+
+class VDMSkill(BaseSkill):
+    name = "describe_scene"
+    description = "使用全局相机和腕部相机 RGB 图像生成 VDM 场景描述。"
+
+    input_schema = {
+        "global_image_path": "可选。全局相机 RGB 图像路径。",
+        "wrist_image_path": "可选。腕部相机 RGB 图像路径。",
+        "use_wrist": "是否同时使用腕部相机图像，默认 True。",
+        "prompt": "可选。自定义 VDM prompt。",
+        "max_tokens": "可选。最大输出 token 数。",
+    }
+
+    output_schema = {
+        "global_image_path": "用于 VDM 的全局相机图像路径",
+        "wrist_image_path": "用于 VDM 的腕部相机图像路径",
+        "scene_text": "Qwen-VL 生成的综合场景描述",
+    }
+
+    def run(
+        self,
+        global_image_path: str = None,
+        wrist_image_path: str = None,
+        use_wrist: bool = True,
+        prompt: str = None,
+        max_tokens: int = 1024,
+        **kwargs,
+    ) -> SkillResult:
+        try:
+            vlm = self.context.require("vlm")
+            camera = self.context.require("camera")
+
+            # 1. 如果没有传入全局图，则拍一张
+            if global_image_path is None:
+                global_capture = camera.capture_global()
+                global_image_path = global_capture["color_path"]
+
+                self.context.emit_image(
+                    image_path=global_image_path,
+                    caption="VDM 使用的全局相机 RGB 图像",
+                )
+
+            # 2. 如果需要腕部图，但没有传入，则拍一张腕部 RGB-D
+            if use_wrist and wrist_image_path is None:
+                wrist_capture = camera.capture_wrist()
+                wrist_image_path = wrist_capture["color_path"]
+
+                self.context.emit_image(
+                    image_path=wrist_image_path,
+                    caption="VDM 使用的腕部相机 RGB 图像",
+                )
+
+            prompt = prompt or DEFAULT_MULTI_VIEW_SCENE_PROMPT
+
+            image_paths = [global_image_path]
+
+            if use_wrist and wrist_image_path is not None:
+                image_paths.append(wrist_image_path)
+
+            self.context.emit_text(
+                f"正在调用 Qwen3-VL 生成多视角 VDM 场景描述，输入图像数量：{len(image_paths)}"
+            )
+
+            scene_text = vlm.describe_images(
+                image_paths=image_paths,
+                prompt=prompt,
+                max_tokens=max_tokens,
+            )
+
+            self.context.emit_text("多视角 VDM 场景描述生成完成。")
+            self.context.emit_text(scene_text)
+
+            return SkillResult(
+                success=True,
+                data={
+                    "global_image_path": global_image_path,
+                    "wrist_image_path": wrist_image_path,
+                    "use_wrist": use_wrist,
+                    "scene_text": scene_text,
+                },
+                message="多视角 VDM 场景描述生成成功",
+            )
+
+        except Exception as e:
+            error = f"多视角 VDM 场景描述失败: {e}"
+
+            try:
+                self.context.emit_error(error)
+            except Exception:
+                pass
+
+            return SkillResult(
+                success=False,
+                data={},
+                error=error,
+            )

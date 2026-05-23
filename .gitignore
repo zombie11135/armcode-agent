@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Runtime outputs
+runs/
+logs/
+outputs/
+tmp/
+temp/
+
+# Model weights / checkpoints
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.safetensors
+*.tar
+*.bin
+
+# Large/local dependencies
+models/
+weights/
+checkpoints/
+
+# ROS / build
+build/
+devel/
+install/
+log/
+
+# Secrets / licenses
+.env
+.env*
+*.lic
+license/
+*.key
+*.pem
+
+# Local records
+.TimeRecorddependencies/
