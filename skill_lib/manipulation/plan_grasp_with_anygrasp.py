@@ -3,6 +3,7 @@
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
 import math
+import random
 import yaml
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -21,13 +22,26 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
         # AnyGrasp 参数
         lims: Optional[List[float]] = None,
         auto_lims_from_mask: bool = True,
+        auto_lims_from_bbox: bool = True,
         lims_margin: float = 0.03,
+        bbox_margin_px: int = 12,
         use_mask_points: bool = True,
+        use_roi_points_for_inference: bool = True,
         min_mask_points: int = 200,
+        filter_grasps_by_bbox: bool = False,
+        bbox_filter_margin_px: int = 0,
+        bbox_filter_inner_margin_ratio: float = 0.15,
+        fallback_to_roi_points_when_bbox_empty: bool = True,
+        visualize_bbox_filtered_grasps: bool = False,
+        visualize_bbox_filtered_top_k: int = 100,
         top_k: int = 50,
         apply_object_mask: bool = True,
         dense_grasp: bool = False,
         collision_detection: bool = True,
+        visualize_grasps: bool = False,
+        visualize_top_k: int = 20,
+        visualize_best_only: bool = False,
+        visualize_selected_grasp: bool = False,
 
         # xArm / 手眼参数
         xarm_ip: str = "192.168.1.237",
@@ -46,6 +60,10 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
         lam_rx: float = 1.0,
         lam_ry: float = 1.0,
         enable_pose_fix: bool = True,
+        grasp_selection_mode: str = "random_top_k_good",
+        random_select_top_k: int = 5,
+        random_seed: Optional[int] = None,
+        fallback_to_raw_when_no_good: bool = False,
 
         # 预抓取 / 抬升
         approach_clearance_mm: float = 80.0,
@@ -61,6 +79,7 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
             depth_npy_path = grasp_input.get("depth_npy_path")
             mask_path = grasp_input.get("mask_path")
             mask_npy_path = grasp_input.get("mask_npy_path")
+            bbox = grasp_input.get("bbox")
 
             intrinsics = (
                 grasp_input.get("depth_intrinsics")
@@ -87,17 +106,30 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
                 depth_npy_path=depth_npy_path,
                 mask_path=mask_path,
                 mask_npy_path=mask_npy_path,
+                bbox=bbox,
                 intrinsics=intrinsics,
                 depth_scale=depth_scale,
                 lims=lims,
                 auto_lims_from_mask=auto_lims_from_mask,
+                auto_lims_from_bbox=auto_lims_from_bbox,
                 lims_margin=lims_margin,
+                bbox_margin_px=bbox_margin_px,
                 use_mask_points=use_mask_points,
+                use_roi_points_for_inference=use_roi_points_for_inference,
                 min_mask_points=min_mask_points,
+                filter_grasps_by_bbox=filter_grasps_by_bbox,
+                bbox_filter_margin_px=bbox_filter_margin_px,
+                bbox_filter_inner_margin_ratio=bbox_filter_inner_margin_ratio,
+                fallback_to_roi_points_when_bbox_empty=fallback_to_roi_points_when_bbox_empty,
+                visualize_bbox_filtered_grasps=visualize_bbox_filtered_grasps,
+                visualize_bbox_filtered_top_k=visualize_bbox_filtered_top_k,
                 top_k=top_k,
                 apply_object_mask=apply_object_mask,
                 dense_grasp=dense_grasp,
                 collision_detection=collision_detection,
+                visualize_grasps=visualize_grasps,
+                visualize_top_k=visualize_top_k,
+                visualize_best_only=visualize_best_only,
                 output_json_path="runs/current_capture/anygrasp_result.json",
             )
 
@@ -194,20 +226,90 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
 
             if good:
                 good.sort(key=lambda c: c["effective_score"], reverse=True)
-                chosen = good[0]
-                choose_reason = (
-                    f"选择满足姿态约束的抓取："
-                    f"{len(good)}/{len(converted_candidates)} 个候选满足 "
-                    f"rx≤{max_rx_tilt_deg}°, ry≤{max_ry_tilt_deg}°"
-                )
+                if grasp_selection_mode == "best_good":
+                    choose_pool = good[:1]
+                    chosen = good[0]
+                    choose_reason = (
+                        f"选择满足姿态约束的最高分抓取："
+                        f"{len(good)}/{len(converted_candidates)} 个候选满足 "
+                        f"rx≤{max_rx_tilt_deg}°, ry≤{max_ry_tilt_deg}°"
+                    )
+                elif grasp_selection_mode == "random_top_k_good":
+                    choose_pool = good[:max(1, min(int(random_select_top_k), len(good)))]
+                    chosen = self._random_pick(choose_pool, random_seed=random_seed)
+                    choose_reason = (
+                        f"在满足姿态约束的前 {len(choose_pool)} 个抓取中随机选择："
+                        f"{len(good)}/{len(converted_candidates)} 个候选满足 "
+                        f"rx≤{max_rx_tilt_deg}°, ry≤{max_ry_tilt_deg}°"
+                    )
+                elif grasp_selection_mode == "random_good":
+                    choose_pool = good
+                    chosen = self._random_pick(choose_pool, random_seed=random_seed)
+                    choose_reason = (
+                        f"在所有满足姿态约束的 {len(choose_pool)} 个抓取中随机选择："
+                        f"{len(good)}/{len(converted_candidates)} 个候选满足 "
+                        f"rx≤{max_rx_tilt_deg}°, ry≤{max_ry_tilt_deg}°"
+                    )
+                else:
+                    return SkillResult(
+                        success=False,
+                        data={
+                            **anygrasp_result,
+                            "current_ee_pose_mrad": [float(x) for x in current_ee_pose_mrad],
+                            "converted_candidates": converted_candidates,
+                            "valid_grasp_selection_modes": [
+                                "random_good",
+                                "random_top_k_good",
+                                "best_good",
+                            ],
+                        },
+                        error=f"未知 grasp_selection_mode: {grasp_selection_mode}",
+                    )
             else:
+                if not fallback_to_raw_when_no_good:
+                    return SkillResult(
+                        success=False,
+                        data={
+                            **anygrasp_result,
+                            "current_ee_pose_mrad": [float(x) for x in current_ee_pose_mrad],
+                            "handeye_rot": handeye_rot.tolist(),
+                            "handeye_trans": handeye_trans.tolist(),
+                            "converted_candidates": converted_candidates,
+                            "max_rx_tilt_deg": max_rx_tilt_deg,
+                            "max_ry_tilt_deg": max_ry_tilt_deg,
+                        },
+                        error=(
+                            "没有候选同时满足姿态约束，未进行 raw_score 退化选择。"
+                            "如需退化，请设置 fallback_to_raw_when_no_good=True。"
+                        ),
+                    )
+
                 converted_candidates.sort(key=lambda c: c["raw_score"], reverse=True)
-                chosen = converted_candidates[0]
+                choose_pool = converted_candidates[:max(
+                    1,
+                    min(int(random_select_top_k), len(converted_candidates)),
+                )]
+                chosen = self._random_pick(choose_pool, random_seed=random_seed)
                 choose_reason = (
-                    f"没有候选同时满足姿态约束，退化为选择 raw_score 最高抓取。"
+                    f"没有候选同时满足姿态约束，按参数退化为在 raw_score 前 "
+                    f"{len(choose_pool)} 个抓取中随机选择。"
                 )
 
             best_xarm_pose = chosen["xarm_pose_mmrad"]
+
+            selected_visualization_error = None
+            if visualize_selected_grasp:
+                try:
+                    chosen_index = chosen["camera_grasp"].get("index")
+                    anygrasp.visualize_last_grasps_by_indices(
+                        indices=[chosen_index],
+                        window_name="Selected AnyGrasp grasp",
+                    )
+                except Exception as e:
+                    selected_visualization_error = str(e)
+                    self.context.emit_warning(
+                        f"最终选中抓取可视化失败: {selected_visualization_error}"
+                    )
 
             approach_pose = list(best_xarm_pose)
             approach_pose[2] = approach_pose[2] + approach_clearance_mm
@@ -230,6 +332,13 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
                 "lift_pose_mmrad": lift_pose,
 
                 "chosen_candidate": chosen,
+                "grasp_selection_mode": grasp_selection_mode,
+                "random_select_top_k": random_select_top_k,
+                "random_seed": random_seed,
+                "fallback_to_raw_when_no_good": fallback_to_raw_when_no_good,
+                "choose_pool_size": len(choose_pool),
+                "visualize_selected_grasp": visualize_selected_grasp,
+                "selected_visualization_error": selected_visualization_error,
                 "converted_candidates": converted_candidates,
                 "choose_reason": choose_reason,
 
@@ -484,6 +593,14 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
         """
         d = (a - b + np.pi) % (2 * np.pi) - np.pi
         return float(abs(d))
+
+    @staticmethod
+    def _random_pick(candidates: List[Dict[str, Any]], random_seed: Optional[int] = None):
+        if not candidates:
+            raise ValueError("random pick candidates is empty")
+
+        rng = random.Random(random_seed) if random_seed is not None else random
+        return rng.choice(candidates)
 
     @staticmethod
     def _rx(a):

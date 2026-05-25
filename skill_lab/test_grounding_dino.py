@@ -53,7 +53,6 @@ def main():
 
     text_prompt = (
         "medicine box. drug box.  pharmaceutical box. "
-        "apple. orange. banana. fruit. "
     )
 
     print(f"[GroundingDINO] device = {device}")
@@ -86,8 +85,8 @@ def main():
     results = processor.post_process_grounded_object_detection(
     outputs,
     inputs.input_ids,
-    threshold=0.25,
-    text_threshold=0.25,
+    threshold=0.20,
+    text_threshold=0.12,
     target_sizes=[image.size[::-1]],
 )[0]
 

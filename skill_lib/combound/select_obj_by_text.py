@@ -13,20 +13,40 @@ DEFAULT_TEXT_ALIASES = {
         "芬必得",
         "ibuprofen",
         "IBUPROFEN",
+        "ibuprofe",
+        "buprofen",
     ],
     "西瓜霜": [
         "西瓜霜",
         "桂林西瓜霜",
+        "西瓜",
+        "瓜霜",
     ],
     "999": [
         "999",
         "三九",
         "抗病毒口服液",
+        "抗病毒",
+        "口服液",
     ],
     "抗病毒": [
         "抗病毒",
         "抗病毒口服液",
         "999",
+        "口服液",
+    ],
+    "抗病毒口服液": [
+        "抗病毒口服液",
+        "抗病毒",
+        "口服液",
+        "999",
+        "三九",
+    ],
+    "蒙脱石散": [
+        "蒙脱石散",
+        "蒙脱石",
+        "思密达",
+        "smecta",
     ],
 }
 
@@ -181,6 +201,8 @@ class SelectObjectByTextSkill(BaseSkill):
 
         text = str(text)
         text = text.lower()
+        text = text.replace("〇", "0").replace("Ｏ", "0").replace("o", "0")
+        text = text.replace("Ⅰ", "1").replace("ｌ", "1").replace("l", "1")
         text = re.sub(r"\s+", "", text)
         text = re.sub(r"[，。、“”‘’：:；;（）()【】\[\]{}<>《》,.\-_/\\|]", "", text)
 
@@ -268,5 +290,22 @@ class SelectObjectByTextSkill(BaseSkill):
                 best_score = ratio
                 best_keyword = keyword
                 best_type = "fuzzy"
+
+            # 4. 局部窗口模糊匹配：OCR 常把药盒上的整段说明拼在一起，
+            # 直接拿 keyword 和全文比会被长文本稀释。
+            if len(norm_text) > len(norm_kw) and len(norm_kw) >= 2:
+                win = len(norm_kw)
+                for start in range(0, max(1, len(norm_text) - win + 1)):
+                    chunk = norm_text[start:start + win]
+                    local_ratio = difflib.SequenceMatcher(
+                        None,
+                        norm_kw,
+                        chunk,
+                    ).ratio()
+                    score = 0.92 * local_ratio
+                    if score > best_score:
+                        best_score = score
+                        best_keyword = keyword
+                        best_type = "local_fuzzy"
 
         return best_score, best_keyword, best_type

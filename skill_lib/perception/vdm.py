@@ -75,6 +75,7 @@ class VDMSkill(BaseSkill):
     ) -> SkillResult:
         try:
             vlm = self.context.require("vlm")
+            fallback_vlm = getattr(self.context, "fallback_vlm", None)
             camera = self.context.require("camera")
 
             # 1. 如果没有传入全局图，则拍一张
@@ -105,16 +106,18 @@ class VDMSkill(BaseSkill):
                 image_paths.append(wrist_image_path)
 
             self.context.emit_text(
-                f"正在调用 Qwen3-VL 生成多视角 VDM 场景描述，输入图像数量：{len(image_paths)}"
+                f"正在调用 VDM 生成多视角场景描述，输入图像数量：{len(image_paths)}"
             )
 
-            scene_text = vlm.describe_images(
+            scene_text, provider = self._describe_images_with_fallback(
+                primary_vlm=vlm,
+                fallback_vlm=fallback_vlm,
                 image_paths=image_paths,
                 prompt=prompt,
                 max_tokens=max_tokens,
             )
 
-            self.context.emit_text("多视角 VDM 场景描述生成完成。")
+            self.context.emit_text(f"多视角 VDM 场景描述生成完成，provider={provider}。")
             self.context.emit_text(scene_text)
 
             return SkillResult(
@@ -124,6 +127,7 @@ class VDMSkill(BaseSkill):
                     "wrist_image_path": wrist_image_path,
                     "use_wrist": use_wrist,
                     "scene_text": scene_text,
+                    "provider": provider,
                 },
                 message="多视角 VDM 场景描述生成成功",
             )
@@ -141,3 +145,36 @@ class VDMSkill(BaseSkill):
                 data={},
                 error=error,
             )
+
+    def _describe_images_with_fallback(
+        self,
+        primary_vlm,
+        fallback_vlm,
+        image_paths,
+        prompt: str,
+        max_tokens: int,
+    ):
+        try:
+            scene_text = primary_vlm.describe_images(
+                image_paths=image_paths,
+                prompt=prompt,
+                max_tokens=max_tokens,
+            )
+            return scene_text, "primary_vlm"
+        except Exception as primary_error:
+            if fallback_vlm is None:
+                raise
+
+            try:
+                self.context.emit_warning(
+                    f"主 VDM 调用失败，切换到 API fallback: {primary_error}"
+                )
+            except Exception:
+                pass
+
+            scene_text = fallback_vlm.describe_images(
+                image_paths=image_paths,
+                prompt=prompt,
+                max_tokens=max_tokens,
+            )
+            return scene_text, "fallback_vlm"
