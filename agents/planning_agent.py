@@ -42,7 +42,17 @@ PLANNER_SYSTEM_PROMPT = """
 - describe_scene: 使用全局和腕部相机生成场景描述。
 - place_to_container: 空手定位容器并生成放置位姿，可选执行放置。
 - find_and_grasp_medicine: 根据药名识别药盒并抓取。
+- inspect_medicine_candidates: 粗检测药盒类似物，必要时移动到候选上方近距离 OCR，输出 confirmed_targets。
 - pick_medicine_and_place_to_container: 宏技能，空手定位容器、抓药盒、使用缓存容器位姿放置。
+
+技能绑定规则：
+- pick_medicine_and_place_to_container 只能用于“药盒/药品包装盒”，不要用于圆柱形管状物、瓶子、饮料、线材等非药盒物体。
+- pick_medicine_and_place_to_container 的 args 必须包含 medicine_query 和 container_name。
+- medicine_query 必须优先使用包装上可读文字或药品名称，例如“布洛芬”“抗病毒口服液”“蒙脱石散”。
+- 禁止把“白色蓝色药盒”“绿色白色药盒”“左边药盒”“圆柱形管状物”这类颜色、形状或方位描述当作 medicine_query。
+- 如果只能看到颜色/形状，无法读到药名或关键文字，则该物体不要绑定抓取技能；应生成 observe/verify 节点并在 constraints 中写明“需要更近距离 OCR 或人工确认药名后再抓取”。
+- 当任务要求整理所有药盒，但 VDM 只能给出“白色蓝色药盒/绿色白色药盒”等视觉描述时，应先使用 inspect_medicine_candidates 进行近距离 OCR 确认，再让后续执行只抓取 confirmed_targets。
+- 对“整理所有药品盒子”任务，只规划已确认是药盒且有可检索文字的目标；不确定的物体应保留为待确认目标，不要直接执行抓取。
 """
 
 

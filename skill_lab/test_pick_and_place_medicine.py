@@ -156,6 +156,7 @@ def main():
     parser.add_argument("--grip_timeout", type=float, default=5.0)
     parser.add_argument("--grip_open_value", type=int, default=1)
     parser.add_argument("--grip_close_value", type=int, default=0)
+    parser.add_argument("--gripper_close_wait_s", type=float, default=1.5)
     parser.add_argument("--ignore_grip_error", action="store_true", default=True)
     parser.add_argument("--verbose_events", action="store_true")
     args = parser.parse_args()
@@ -259,6 +260,7 @@ def main():
             move_acc=args.move_acc,
             gripper_open=gripper_open,
             gripper_close=gripper_close,
+            gripper_close_wait_s=args.gripper_close_wait_s,
             container_detection_threshold=args.container_box_threshold,
             container_text_threshold=args.container_text_threshold,
             container_detection_index=args.container_detection_index,

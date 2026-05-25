@@ -555,7 +555,7 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
 
         # 保留你之前 fix_result 中对低高度/姿态的保护逻辑
         if(pose[2]<140):
-            pose[2] = 150
+            pose[2] = 148
         return [float(x) for x in pose]
 
     @staticmethod

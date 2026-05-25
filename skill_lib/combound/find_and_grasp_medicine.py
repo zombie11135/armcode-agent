@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 import math
+import time
 
 from core.skill_base import BaseSkill, SkillResult
 from skill_lib.combound.select_obj_by_text import SelectObjectByTextSkill
@@ -86,6 +87,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
         move_acc: float = 500,
         gripper_open: Optional[Callable[[], bool]] = None,
         gripper_close: Optional[Callable[[], bool]] = None,
+        gripper_close_wait_s: float = 1.5,
         **kwargs,
     ) -> SkillResult:
         try:
@@ -231,6 +233,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
                         move_acc=move_acc,
                         gripper_open=gripper_open,
                         gripper_close=gripper_close,
+                        gripper_close_wait_s=gripper_close_wait_s,
                     )
                     result_data["execution"] = exec_result
 
@@ -655,6 +658,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
         move_acc: float,
         gripper_open: Optional[Callable[[], bool]],
         gripper_close: Optional[Callable[[], bool]],
+        gripper_close_wait_s: float,
     ) -> Dict[str, Any]:
         arm = self.context.require("xarm")
         approach = plan.get("approach_pose_mmrad")
@@ -675,6 +679,10 @@ class FindAndGraspMedicineSkill(BaseSkill):
 
         if gripper_close and not gripper_close():
             return {"success": False, "error": "夹爪闭合失败。"}
+
+        if gripper_close_wait_s > 0:
+            self.context.emit_text(f"等待夹爪完全闭合：{gripper_close_wait_s:.2f}s")
+            time.sleep(float(gripper_close_wait_s))
 
         if not self._move_xarm(arm, lift, move_speed, move_acc):
             return {"success": False, "error": "xArm 抬升失败。"}

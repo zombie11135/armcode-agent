@@ -159,6 +159,7 @@ def main():
     parser.add_argument("--grip_timeout", type=float, default=5.0)
     parser.add_argument("--grip_open_value", type=int, default=1)
     parser.add_argument("--grip_close_value", type=int, default=0)
+    parser.add_argument("--gripper_close_wait_s", type=float, default=1.5)
     parser.add_argument("--ignore_grip_error", action="store_true", default=True)
     args = parser.parse_args()
 
@@ -284,6 +285,7 @@ def main():
             move_acc=args.move_acc,
             gripper_open=gripper_open,
             gripper_close=gripper_close,
+            gripper_close_wait_s=args.gripper_close_wait_s,
             handeye_config_path=args.handeye_config,
             top_k=args.top_k,
             grasp_selection_mode=args.grasp_selection_mode,

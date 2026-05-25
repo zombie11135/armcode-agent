@@ -55,6 +55,7 @@ class PickMedicineAndPlaceToContainerSkill(BaseSkill):
         grasp_top_k: int = 50,
         grasp_selection_mode: str = "random_top_k_good",
         grasp_random_select_top_k: int = 5,
+        gripper_close_wait_s: float = 1.5,
         bbox_filter_inner_margin_ratio: float = 0.15,
         visualize_selected_grasp: bool = False,
         visualize_bbox_filtered_grasps: bool = False,
@@ -137,6 +138,7 @@ class PickMedicineAndPlaceToContainerSkill(BaseSkill):
                 move_acc=move_acc,
                 gripper_open=gripper_open,
                 gripper_close=gripper_close,
+                gripper_close_wait_s=gripper_close_wait_s,
                 fallback_intrinsics=fallback_intrinsics,
             )
 

@@ -56,8 +56,15 @@ class CodeGenerator:
         nodes = self._topological_nodes(graph)
 
         calls = []
+        invalid_nodes = []
         for node in nodes:
             if node.skill not in self.SUPPORTED_SKILLS:
+                continue
+
+            args = self._normalize_pick_place_args(node)
+            validation_error = self._validate_pick_place_call(node, args)
+            if validation_error:
+                invalid_nodes.append(validation_error)
                 continue
 
             calls.append(
@@ -65,8 +72,17 @@ class CodeGenerator:
                     node_id=node.node_id,
                     label=node.label,
                     skill=node.skill,
-                    args=self._normalize_pick_place_args(node),
+                    args=args,
                 )
+            )
+
+        if invalid_nodes:
+            details = "\n".join([f"- {item}" for item in invalid_nodes])
+            raise ValueError(
+                "PlanGraph 中存在无法安全生成抓取代码的节点：\n"
+                f"{details}\n"
+                "请重新规划：pick_medicine_and_place_to_container 的 medicine_query "
+                "必须是药盒上的可读药名/文字，不能是颜色、形状或方位描述。"
             )
 
         # If a macro root expands into granular children, prefer the explicit
@@ -143,6 +159,88 @@ class CodeGenerator:
             "source_args": args,
         }
 
+    @classmethod
+    def _validate_pick_place_call(cls, node: PlanNode, args: Dict[str, Any]) -> Optional[str]:
+        medicine_query = str(args.get("medicine_query") or "").strip()
+        if not medicine_query:
+            return f"{node.node_id} {node.label}: 缺少 medicine_query。"
+
+        if cls._looks_like_non_box_object(medicine_query, node):
+            return (
+                f"{node.node_id} {node.label}: “{medicine_query}” 看起来不是药盒名称，"
+                "当前抓取技能只支持药盒/药品包装盒。"
+            )
+
+        if cls._looks_like_visual_description(medicine_query):
+            return (
+                f"{node.node_id} {node.label}: medicine_query=“{medicine_query}” 是颜色/形状/方位描述，"
+                "OCR 匹配不稳定。请让 planner 使用药盒上的文字，例如 布洛芬/抗病毒口服液。"
+            )
+
+        return None
+
+    @staticmethod
+    def _looks_like_visual_description(text: str) -> bool:
+        text = str(text or "").strip()
+        if not text:
+            return True
+
+        known_text_tokens = [
+            "布洛芬",
+            "抗病毒",
+            "口服液",
+            "蒙脱石",
+            "西瓜霜",
+            "胶囊",
+            "颗粒",
+            "片",
+            "OTC",
+            "IBUPROFEN",
+            "999",
+        ]
+        if any(token.lower() in text.lower() for token in known_text_tokens):
+            return False
+
+        visual_tokens = [
+            "白色",
+            "蓝色",
+            "绿色",
+            "红色",
+            "黄色",
+            "黑色",
+            "粉色",
+            "左边",
+            "右边",
+            "中间",
+            "前方",
+            "后方",
+            "上方",
+            "下方",
+            "较大",
+            "较小",
+            "长方形",
+            "矩形",
+            "盒子",
+            "药盒",
+            "包装",
+        ]
+        visual_hit_count = sum(1 for token in visual_tokens if token in text)
+        return visual_hit_count > 0 and len(text) <= 12
+
+    @staticmethod
+    def _looks_like_non_box_object(text: str, node: PlanNode) -> bool:
+        joined = "\n".join([text, node.label or "", node.instruction or ""])
+        non_box_tokens = [
+            "圆柱",
+            "管状",
+            "瓶",
+            "饮料",
+            "线材",
+            "电缆",
+            "急停",
+        ]
+        return any(token in joined for token in non_box_tokens)
+
     @staticmethod
     def _infer_medicine_query(text: str) -> str:
         known = [
@@ -216,9 +314,8 @@ from services.grounding_dino_detector_service import GroundingDINODetectorServic
 from services.ocr_service import PaddleOCRService
 from services.realsense_dual_camera_service import CameraConfig, RealSenseDualCameraService
 from services.anygrasp_service import AnyGraspService
-from skill_lib.combound.pick_medicine_and_place_to_container import (
-    PickMedicineAndPlaceToContainerSkill,
-)
+from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
+from skill_lib.combound.place_to_container import PlaceToContainerSkill
 
 
 GOAL = {goal_json}
@@ -362,6 +459,56 @@ def build_context(args):
     return context, camera_service
 
 
+def group_steps_by_container(steps):
+    groups = []
+    group_by_container = {{}}
+    for step in steps:
+        container_name = step["args"]["container_name"]
+        if container_name not in group_by_container:
+            group = {{"container_name": container_name, "steps": []}}
+            group_by_container[container_name] = group
+            groups.append(group)
+        group_by_container[container_name]["steps"].append(step)
+    return groups
+
+
+def move_xarm(arm, pose, speed, acc) -> bool:
+    x, y, z, rx, ry, rz = [float(v) for v in pose]
+    code = arm.set_position(
+        x=x,
+        y=y,
+        z=z,
+        roll=rx,
+        pitch=ry,
+        yaw=rz,
+        speed=speed,
+        mvacc=acc,
+        wait=True,
+    )
+    return code == 0
+
+
+def execute_cached_place(context, place_plan, args, gripper_open):
+    arm = context.require("xarm")
+    approach_pose = place_plan["approach_pose_mmrad"]
+    place_pose = place_plan["place_pose_mmrad"]
+    lift_pose = place_plan["lift_pose_mmrad"]
+
+    if not move_xarm(arm, approach_pose, args.move_speed, args.move_acc):
+        return {{"success": False, "error": "移动到缓存 approach pose 失败。"}}
+
+    if not move_xarm(arm, place_pose, args.move_speed, args.move_acc):
+        return {{"success": False, "error": "移动到缓存 place pose 失败。"}}
+
+    if gripper_open and not gripper_open():
+        return {{"success": False, "error": "放置时打开夹爪失败。"}}
+
+    if not move_xarm(arm, lift_pose, args.move_speed, args.move_acc):
+        return {{"success": False, "error": "放置后抬升失败。"}}
+
+    return {{"success": True, "message": "缓存放置位姿执行完成。"}}
+
+
 def run_plan(args):
     context, camera_service = build_context(args)
     arm = None
@@ -392,50 +539,45 @@ def run_plan(args):
                 ignore_error=args.ignore_grip_error,
             )
 
-        skill = PickMedicineAndPlaceToContainerSkill(context)
+        place_skill = PlaceToContainerSkill(context)
+        grasp_skill = FindAndGraspMedicineSkill(context)
         results = []
+        step_groups = group_steps_by_container(PLAN_STEPS)
 
         print("\\n=== Generated Plan Executor ===")
         print("goal:", GOAL)
         print("steps:", len(PLAN_STEPS))
+        print("container observations:", len(step_groups))
 
-        for index, step in enumerate(PLAN_STEPS, start=1):
-            call_args = step["args"]
-            medicine_query = call_args["medicine_query"]
-            container_name = call_args["container_name"]
+        finished_steps = 0
+        for group_index, group in enumerate(step_groups, start=1):
+            container_name = group["container_name"]
+            group_steps = group["steps"]
 
-            print(f"\\n=== Step {{index}}/{{len(PLAN_STEPS)}}: {{step['node_id']}} {{step['label']}} ===")
-            print("medicine_query:", medicine_query)
+            print(f"\\n=== Container Observation {{group_index}}/{{len(step_groups)}} ===")
             print("container_name:", container_name)
+            print("reuse_for_steps:", [step["node_id"] for step in group_steps])
 
-            result = skill.run(
-                medicine_query=medicine_query,
+            place_result = place_skill.run(
                 container_name=container_name,
-                execute=args.execute,
+                camera_name="wrist",
+                detection_threshold=args.container_box_threshold,
+                text_threshold=args.container_text_threshold,
+                detection_index=args.container_detection_index,
+                depth_window_px=args.container_depth_window_px,
                 xarm_ip=args.xarm_ip,
                 handeye_config_path=args.handeye_config,
-                pre_grasp_pose_mmrad=None if args.no_pre_grasp_pose else args.pre_grasp_pose,
+                place_clearance_mm=args.place_clearance_mm,
+                approach_clearance_mm=args.place_approach_clearance_mm,
+                lift_after_place_mm=args.place_lift_after_mm,
+                refine_observation=not args.no_container_refine,
+                refine_only_when_execute=not args.execute,
+                refine_observe_z_mm=args.container_refine_observe_z_mm,
+                refine_wait_s=args.container_refine_wait_s,
+                execute=False,
                 move_speed=args.move_speed,
                 move_acc=args.move_acc,
-                gripper_open=gripper_open,
-                gripper_close=gripper_close,
-                container_detection_threshold=args.container_box_threshold,
-                container_text_threshold=args.container_text_threshold,
-                container_detection_index=args.container_detection_index,
-                container_depth_window_px=args.container_depth_window_px,
-                container_refine_observation=not args.no_container_refine,
-                container_refine_observe_z_mm=args.container_refine_observe_z_mm,
-                container_refine_wait_s=args.container_refine_wait_s,
-                place_clearance_mm=args.place_clearance_mm,
-                grasp_detection_threshold=args.grasp_box_threshold,
-                grasp_text_threshold=args.grasp_text_threshold,
-                grasp_min_score=args.grasp_min_score,
-                grasp_top_k=args.grasp_top_k,
-                grasp_selection_mode=args.grasp_selection_mode,
-                grasp_random_select_top_k=args.grasp_random_select_top_k,
-                bbox_filter_inner_margin_ratio=args.bbox_filter_inner_margin_ratio,
-                visualize_selected_grasp=args.visualize_selected_grasp,
-                visualize_bbox_filtered_grasps=args.visualize_bbox_filtered_grasps,
+                gripper_open=None,
                 fallback_intrinsics={{
                     "fx": 909.59,
                     "fy": 909.80,
@@ -444,27 +586,117 @@ def run_plan(args):
                 }},
             )
 
-            if not result.success:
-                print("\\n=== Step Failed ===")
-                print("node_id:", step["node_id"])
-                print("error:", result.error)
-                print("stage:", result.data.get("stage") if isinstance(result.data, dict) else None)
-                results.append({{"node_id": step["node_id"], "success": False, "error": result.error}})
+            if not place_result.success:
+                print("\\n=== Container Observation Failed ===")
+                print("container_name:", container_name)
+                print("error:", place_result.error)
+                results.append({{
+                    "container_name": container_name,
+                    "success": False,
+                    "error": place_result.error,
+                }})
                 return False, results
 
-            data = result.data
-            grasp_plan = (data.get("grasp_result") or {{}}).get("grasp_plan", {{}})
-            place_plan = data.get("place_plan") or {{}}
-
-            print("\\n=== Step Result ===")
-            print("success:", result.success)
+            place_plan = place_result.data
             print("cached_place_pose_mmrad:")
             pprint(place_plan.get("place_pose_mmrad"))
-            print("grasp_pose_mmrad:")
-            pprint(grasp_plan.get("best_grasp_xarm_mmrad"))
-            print("grasp_choose_reason:", grasp_plan.get("choose_reason"))
-            print("place_execution:", data.get("place_execution"))
-            results.append({{"node_id": step["node_id"], "success": True}})
+
+            for step in group_steps:
+                finished_steps += 1
+                call_args = step["args"]
+                medicine_query = call_args["medicine_query"]
+
+                print(f"\\n=== Step {{finished_steps}}/{{len(PLAN_STEPS)}}: {{step['node_id']}} {{step['label']}} ===")
+                print("medicine_query:", medicine_query)
+                print("container_name:", container_name)
+
+                if args.execute and not args.no_pre_grasp_pose:
+                    print("move_pre_grasp_pose:")
+                    pprint(args.pre_grasp_pose)
+                    if not move_xarm(arm, args.pre_grasp_pose, args.move_speed, args.move_acc):
+                        results.append({{
+                            "node_id": step["node_id"],
+                            "success": False,
+                            "error": "移动到抓取前观察位姿失败。",
+                        }})
+                        return False, results
+
+                grasp_result = grasp_skill.run(
+                    query=medicine_query,
+                    camera_name="wrist",
+                    min_score=args.grasp_min_score,
+                    detection_threshold=args.grasp_box_threshold,
+                    text_threshold=args.grasp_text_threshold,
+                    use_sam_for_selection=False,
+                    use_mask_for_grasp=False,
+                    plan_grasp=True,
+                    execute=args.execute,
+                    top_k=args.grasp_top_k,
+                    grasp_selection_mode=args.grasp_selection_mode,
+                    random_select_top_k=args.grasp_random_select_top_k,
+                    bbox_filter_inner_margin_ratio=args.bbox_filter_inner_margin_ratio,
+                    infer_grasps_on_full_cloud=True,
+                    filter_grasps_by_bbox=True,
+                    visualize_selected_grasp=args.visualize_selected_grasp,
+                    visualize_bbox_filtered_grasps=args.visualize_bbox_filtered_grasps,
+                    move_speed=args.move_speed,
+                    move_acc=args.move_acc,
+                    gripper_open=gripper_open,
+                    gripper_close=gripper_close,
+                    gripper_close_wait_s=args.gripper_close_wait_s,
+                    fallback_intrinsics={{
+                        "fx": 909.59,
+                        "fy": 909.80,
+                        "cx": 658.97,
+                        "cy": 355.42,
+                    }},
+                    xarm_ip=args.xarm_ip,
+                    handeye_config_path=args.handeye_config,
+                )
+
+                if not grasp_result.success:
+                    print("\\n=== Step Failed ===")
+                    print("node_id:", step["node_id"])
+                    print("error:", grasp_result.error)
+                    results.append({{
+                        "node_id": step["node_id"],
+                        "success": False,
+                        "error": grasp_result.error,
+                    }})
+                    return False, results
+
+                place_execution = None
+                if args.execute:
+                    place_execution = execute_cached_place(
+                        context=context,
+                        place_plan=place_plan,
+                        args=args,
+                        gripper_open=gripper_open,
+                    )
+                    if not place_execution.get("success", False):
+                        print("\\n=== Cached Place Failed ===")
+                        print("node_id:", step["node_id"])
+                        print("error:", place_execution.get("error"))
+                        results.append({{
+                            "node_id": step["node_id"],
+                            "success": False,
+                            "error": place_execution.get("error"),
+                        }})
+                        return False, results
+
+                grasp_plan = (grasp_result.data or {{}}).get("grasp_plan", {{}})
+
+                print("\\n=== Step Result ===")
+                print("success:", grasp_result.success)
+                print("grasp_pose_mmrad:")
+                pprint(grasp_plan.get("best_grasp_xarm_mmrad"))
+                print("grasp_choose_reason:", grasp_plan.get("choose_reason"))
+                print("place_execution:", place_execution)
+                results.append({{
+                    "node_id": step["node_id"],
+                    "success": True,
+                    "container_reused": True,
+                }})
 
         return True, results
 
@@ -521,6 +753,8 @@ def main():
     parser.add_argument("--container_refine_observe_z_mm", type=float, default=400.0)
     parser.add_argument("--container_refine_wait_s", type=float, default=0.8)
     parser.add_argument("--place_clearance_mm", type=float, default=250.0)
+    parser.add_argument("--place_approach_clearance_mm", type=float, default=120.0)
+    parser.add_argument("--place_lift_after_mm", type=float, default=120.0)
 
     parser.add_argument("--grasp_box_threshold", type=float, default=0.22)
     parser.add_argument("--grasp_text_threshold", type=float, default=0.18)
@@ -542,6 +776,7 @@ def main():
     parser.add_argument("--grip_timeout", type=float, default=5.0)
     parser.add_argument("--grip_open_value", type=int, default=1)
     parser.add_argument("--grip_close_value", type=int, default=0)
+    parser.add_argument("--gripper_close_wait_s", type=float, default=1.5)
     parser.add_argument("--ignore_grip_error", action="store_true", default=True)
     parser.add_argument("--verbose_events", action="store_true")
     args = parser.parse_args()
