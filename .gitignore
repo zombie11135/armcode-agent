@@ -46,4 +46,5 @@ license/
 *.pem
 
 # Local records
-.TimeRecorddependencies/
+.TimeRecord
+dependencies/
